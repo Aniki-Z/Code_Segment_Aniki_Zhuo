@@ -1,0 +1,25 @@
+{
+  "name": "com.aniki.gameplay-systems",
+  "version": "1.0.0",
+  "displayName": "Modular Gameplay Systems",
+  "description": "A clean-room Unity portfolio sample featuring state-driven movement, interactions, inventory, weighted loot, procedural grids, and split-screen cameras.",
+  "unity": "2022.3",
+  "author": {
+    "name": "Aniki",
+    "url": "https://anikiz.com"
+  },
+  "keywords": [
+    "gameplay",
+    "state-machine",
+    "procedural-generation",
+    "split-screen",
+    "inventory"
+  ],
+  "samples": [
+    {
+      "displayName": "Quick Start",
+      "description": "Keyboard input and a minimal interactable example.",
+      "path": "Samples~/QuickStart"
+    }
+  ]
+}

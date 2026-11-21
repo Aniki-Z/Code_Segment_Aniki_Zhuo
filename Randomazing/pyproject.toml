@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "randomazing-game"
+version = "1.0.0"
+description = "A procedural top-down maze shooter built with Python and Pygame"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["pygame>=2.5.2,<3"]
+keywords = ["pygame", "procedural-generation", "maze", "game", "python"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Games/Entertainment",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+randomazing = "randomazing.application:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

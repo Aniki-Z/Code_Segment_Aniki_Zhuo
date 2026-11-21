@@ -1,0 +1,518 @@
+"""Small and merged room geometries, content, and transitions."""
+
+import random
+import pygame
+
+from .collision import deploy_cm
+from .enemies import Elite, KeyGuard, NormalEnemy, Turret
+from .geometry import is_inside
+from .items import HealthPotion
+from .layouts import content_weights, contents, make_layout_1
+from .player import Player
+from .settings import CELL_HEIGHT, CELL_WIDTH, MAZE_SIZE, TILE_HEIGHT, TILE_WIDTH
+from .state import glob_var
+from .tiles import Chest, Exit
+
+class Cell(pygame.sprite.Sprite):
+    def __init__(self, row, col, mini_bound, bound):
+        super().__init__()
+        self.minisurface = pygame.Surface(mini_bound)
+        self.minisurface.set_colorkey("gray")
+        self.minisurface.fill("gray")
+        self.row = row
+        self.col = col
+        self.minipos = pygame.Vector2(TILE_WIDTH * col, TILE_HEIGHT * row)
+        self.pos = pygame.Vector2(CELL_WIDTH * col, CELL_HEIGHT * row)
+        self.bound = pygame.Rect(self.pos, bound)
+        self.locked = False
+        self.has_player = False
+        self.content = []
+        self.enemies = pygame.sprite.Group()
+        self.cm = deploy_cm()
+    def is_including(self, rect: pygame.Rect) -> bool:
+        for point in [rect.topleft, rect.topright, rect.bottomleft, rect.bottomright]:
+            for area in self.areas:
+                if is_inside(pygame.Vector2(point), pygame.Rect(area)):
+                    break
+            else:
+                return False
+        return True
+    def unlock(self):
+        self.locked = False
+    def lock(self):
+        self.locked = True
+    def close_down(self):
+        pass
+    def open_up(self):
+        pass
+    def player_enter(self, player):
+        self.has_player = True
+        self.cm.add_dynamic(player)
+        self.cm.add_dynamic(player.closearea)
+        self.lock()
+    def player_leave(self, player):
+        self.has_player = False
+        self.cm.remove(player)
+        self.cm.remove(player.closearea)
+        if self is not glob_var["grid"].exit_cell:
+            self.unlock()
+    def make_layout(self):
+        pass
+    def clear_layout(self):
+        pass
+    def render_layout(self, surface: pygame.Surface):
+        pass
+    def make_content(self):
+        if self.locked:
+            return
+        elite_cnt = 0
+        for obj in self.content:
+            match obj[0]:
+                case 'normalenemy':
+                    pos = pygame.Vector2(obj[1][0] * TILE_WIDTH, obj[1][1] * TILE_HEIGHT)
+                    batteries = glob_var["player"].batteries
+                    if batteries >= 5 and elite_cnt <= 1 and random.randint(1, 100) <= (batteries - 5) * 5 + 20:
+                        Elite(self, pos)
+                        elite_cnt += 1
+                    else:
+                        NormalEnemy(self, pos)
+                case 'keyguard':
+                    pos = pygame.Vector2(obj[1][0] * TILE_WIDTH, obj[1][1] * TILE_HEIGHT)
+                    KeyGuard(self, pos)
+                case 'turret':
+                    pos = pygame.Vector2(obj[1][0] * TILE_WIDTH, obj[1][1] * TILE_HEIGHT)
+                    countercw = obj[2]
+                    Turret(self, pos, countercw)
+                case 'healthpotion':
+                    pos = pygame.Vector2(obj[1][0] * TILE_WIDTH, obj[1][1] * TILE_HEIGHT)
+                    HealthPotion(self, pos, pygame.Vector2(0, 0))
+                case 'chest':
+                    pos = pygame.Vector2(obj[1][0] * TILE_WIDTH, obj[1][1] * TILE_HEIGHT)
+                    loot_table = obj[2]
+                    Chest(self, pos, loot_table)
+                case 'exit':
+                    pos = pygame.Vector2(obj[1][0] * TILE_WIDTH, obj[1][1] * TILE_HEIGHT)
+                    Exit(self, pos)
+    def clear_content(self):
+        if self.locked:
+            return
+        for obj in self.cm.dynamic_objects:
+            if type(obj) is not Player:
+                obj.kill()
+    def render_content(self, surface):
+        for obj in self.cm.dynamic_objects:
+            obj.render(surface)
+    def set_content(self, content):
+        self.content = content
+    def randomize(self) -> bool:
+        if self.locked:
+            return False
+        candidates = contents[self.shape]
+        weights = content_weights[self.shape[-1]]
+        self.set_content(random.choices(candidates, weights=weights)[0])
+
+class SmallCell(Cell):
+    outerline = [(0, 0), (50, 0), (50, 50), (0, 50)]
+    innerline = [(5, 5), (45, 5), (45, 45), (5, 45)]
+    mini_bound = [TILE_WIDTH, TILE_HEIGHT]
+    bound = [CELL_WIDTH, CELL_HEIGHT]
+    all_small_cells = pygame.sprite.Group()
+    def __init__(self, row, col):
+        super().__init__(row, col, SmallCell.mini_bound, SmallCell.bound)
+        self.shape = '1'
+        self.outerline = SmallCell.outerline
+        self.innerline = SmallCell.innerline
+        self.areas = [
+            (self.pos.x + 50, self.pos.y + 50, CELL_WIDTH - 2 * 50, CELL_HEIGHT - 2 * 50)
+        ]
+        SmallCell.all_small_cells.add(self)
+        self.layout = {
+            'u': 'W' if row == 0 else 'T',
+            'd': 'W' if row == MAZE_SIZE-1 else 'T',
+            'l': 'W' if col == 0 else 'T',
+            'r': 'W' if col == MAZE_SIZE-1 else 'T'
+        }
+        self.merge = None
+        self.tiles = pygame.sprite.Group()
+        self.neighbor_cells = {
+            'u': (None, None),
+            'd': (None, None),
+            'l': (None, None),
+            'r': (None, None)
+        }
+    def get_neighbor(self, direction: str):
+        neighbor = self.neighbor_cells[direction]
+        if neighbor[1] and neighbor[1].merge:
+            neighbor = (neighbor[0], neighbor[1].merge)
+        return neighbor
+    def get_neighbors(self):
+        neighbors = map(lambda x: self.get_neighbor(x), 'udlr')
+        neighbors = [neighbor for neighbor in neighbors if neighbor != (None, None)]
+        return neighbors
+    def lock_tunnels(self):
+        for tunnel, _ in self.get_neighbors():
+            tunnel.lock()
+    def unlock_tunnels(self):
+        for tunnel, _ in self.get_neighbors():
+            tunnel.unlock()
+    def set_breakable(self):
+        for tunnel, _ in self.get_neighbors():
+            tunnel.breakable = True
+    def unset_breakable(self):
+        for tunnel, _ in self.get_neighbors():
+            tunnel.breakable = False
+    def close_down(self):
+        for direction in 'udlr':
+            tunnel = self.neighbor_cells[direction][0]
+            if not tunnel:
+                continue
+            tunnel.close_down()
+    def open_up(self):
+        for direction in 'udlr':
+            tunnel = self.neighbor_cells[direction][0]
+            if not tunnel:
+                continue
+            tunnel.open_up()
+    def is_mergable(self) -> bool:
+        return not self.locked and not self.merge
+    def make_layout(self):
+        make_layout_1(self, self.pos, self.layout, self.cm)
+    def clear_layout(self):
+        for tile in self.tiles.sprites():
+            tile.kill()  # Also unregister the tile from collision managers.
+    def render_layout(self, surface: pygame.Surface):
+        for tile in self.tiles:
+            tile.render(surface)
+
+class LargeCell(Cell):
+    all_large_cells = pygame.sprite.Group()
+    def __init__(self, row, col, cells, tunnels, mini_bound, bound):
+        super().__init__(row, col, mini_bound, bound)
+        LargeCell.all_large_cells.add(self)
+        self.cells = cells
+        self.tunnels = tunnels
+        for cell in self.cells:
+            cell.merge = self
+            cell.clear_layout()
+        for tunnel in self.tunnels:
+            tunnel.merge = self
+        self.make_layout()
+    def get_neighbors(self):
+        neighbors = sum([cell.get_neighbors() for cell in self.cells], [])
+        neighbors = [(tunnel, neighbor) for tunnel, neighbor in neighbors if neighbor not in self.cells]
+        return neighbors
+    def close_down(self):
+        for cell in self.cells:
+            cell.close_down()
+    def open_up(self):
+        for cell in self.cells:
+            cell.open_up()
+    def make_layout(self):
+        for cell, layout in zip(self.cells, self.layouts):
+            make_layout_1(cell, self.pos, layout, self.cm)
+    def clear_layout(self):
+        for cell in self.cells:
+            for tile in cell.tiles:
+                tile.kill()
+    def render_layout(self, surface: pygame.Surface):
+        for tile in sum([list(cell.tiles) for cell in self.cells], []):
+            tile.render(surface)
+    def unmerge(self):
+        if self.locked:
+            return
+        self.clear_layout()
+        for cell in self.cells:
+            cell.merge = None
+            cell.make_layout()
+        for tunnel in self.tunnels:
+            tunnel.merge = None
+        for obj in self.cm.dynamic_objects:
+            obj.kill()
+        self.kill()
+
+class BlockTwoCell(LargeCell):
+    outerline_h2 = [(0, 0), (100, 0), (100, 50), (0, 50)]
+    innerline_h2 = [(5, 5), (95, 5), (95, 45), (5, 45)]
+    mini_bound_h2 = [2 * TILE_WIDTH, TILE_HEIGHT]
+    bound_h2 = [2 * CELL_WIDTH, CELL_HEIGHT]
+    outerline_v2 = [(0, 0), (50, 0), (50, 100), (0, 100)]
+    innerline_v2 = [(5, 5), (45, 5), (45, 95), (5, 95)]
+    mini_bound_v2 = [TILE_WIDTH, 2 * TILE_HEIGHT]
+    bound_v2 = [CELL_WIDTH, 2 * CELL_HEIGHT]
+    def __init__(self, tunnel) -> None:
+        row = tunnel.relations[0].row
+        col = tunnel.relations[0].col
+        match tunnel.direction:
+            case 'h':
+                self.shape = 'h2'
+                self.outerline = BlockTwoCell.outerline_h2
+                self.innerline = BlockTwoCell.innerline_h2
+                mini_bound = BlockTwoCell.mini_bound_h2
+                bound = BlockTwoCell.bound_h2
+                self.areas = [
+                    (col * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, 2 * CELL_WIDTH - 2 * 50, CELL_HEIGHT - 2 * 50)
+                ]
+                self.layouts = [
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'W' if row == MAZE_SIZE-1 else 'T',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'M'
+                    },
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'W' if row == MAZE_SIZE-1 else 'T',
+                        'l': 'M',
+                        'r': 'W' if col+1 == MAZE_SIZE-1 else 'T'
+                    }
+                ]
+            case 'v':
+                self.shape = 'v2'
+                self.outerline = BlockTwoCell.outerline_v2
+                self.innerline = BlockTwoCell.innerline_v2
+                mini_bound = BlockTwoCell.mini_bound_v2
+                bound = BlockTwoCell.bound_v2
+                self.areas = [
+                    (col * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, CELL_WIDTH - 2 * 50, 2 * CELL_HEIGHT - 2 * 50)
+                ]
+                self.layouts = [
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'M',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'W' if col == MAZE_SIZE-1 else 'T'
+                    },
+                    {
+                        'u': 'M',
+                        'd': 'W' if row+1 == MAZE_SIZE-1 else 'T',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'W' if col == MAZE_SIZE-1 else 'T'
+                    }
+                ]
+        super().__init__(row, col, [tunnel.relations[0], tunnel.relations[1]], [tunnel], mini_bound, bound)
+    def is_inside(self, pos) -> bool:
+        inside_pos = (pos[0] - self.pos[0], pos[1] - self.pos[1])
+        match self.shape:
+            case 'h2':
+                if 0 <= inside_pos[0] <= 100 and 0 <= inside_pos[1] <= 50:
+                    return True
+            case 'v2':
+                if 0 <= inside_pos[0] <= 50 and 0 <= inside_pos[1] <= 100:
+                    return True
+        return False
+
+class LCell(LargeCell):
+    outerline_ulL = [(0, 0), (100, 0), (100, 50), (50, 50), (50, 100), (0, 100)]
+    innerline_ulL = [(5, 5), (95, 5), (95, 45), (45, 45), (45, 95), (5, 95)]
+    outerline_dlL = [(0, 0), (50, 0), (50, 50), (100, 50), (100, 100), (0, 100)]
+    innerline_dlL = [(5, 5), (45, 5), (45, 55), (95, 55), (95, 95), (5, 95)]
+    outerline_urL = [(0, 0), (100, 0), (100, 100), (50, 100), (50, 50), (0, 50)]
+    innerline_urL = [(5, 5), (95, 5), (95, 95), (55, 95), (55, 45), (5, 45)]
+    outerline_drL = [(50, 0), (100, 0), (100, 100), (0, 100), (0, 50), (50, 50)]
+    innerline_drL = [(55, 5), (95, 5), (95, 95), (5, 95), (5, 55), (55, 55)]
+    mini_bound = [2 * TILE_WIDTH, 2 * TILE_HEIGHT]
+    bound = [2 * CELL_WIDTH, 2 * CELL_HEIGHT]
+    def __init__(self, shape, htunnel, vtunnel):
+        tunnels = [htunnel, vtunnel]
+        self.shape = shape
+        match shape:
+            case 'ulL':
+                assert(htunnel.relations[0] is vtunnel.relations[0])
+                row = htunnel.relations[0].row
+                col = htunnel.relations[0].col
+                self.outerline = LCell.outerline_ulL
+                self.innerline = LCell.innerline_ulL
+                cells = [htunnel.relations[0], htunnel.relations[1], vtunnel.relations[1]]
+                self.areas = [
+                    (col * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, 2 * CELL_WIDTH - 2 * 50, CELL_HEIGHT - 2 * 50),
+                    (col * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, CELL_WIDTH - 2 * 50, 2 * CELL_HEIGHT - 2 * 50)
+                ]
+                self.layouts = [
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'M',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'M'
+                    },
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'W' if row == MAZE_SIZE-1 else 'T',
+                        'l': 'M',
+                        'r': 'W' if col+1 == MAZE_SIZE-1 else 'T'
+                    },
+                    {
+                        'u': 'M',
+                        'd': 'W' if row+1 == MAZE_SIZE-1 else 'T',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'W' if col == MAZE_SIZE-1 else 'T'
+                    }
+                ]
+            case 'dlL':
+                assert(htunnel.relations[0] is vtunnel.relations[1])
+                row = vtunnel.relations[0].row
+                col = vtunnel.relations[0].col
+                self.outerline = LCell.outerline_dlL
+                self.innerline = LCell.innerline_dlL
+                cells = [vtunnel.relations[0], htunnel.relations[0], htunnel.relations[1]]
+                self.areas = [
+                    (col * CELL_WIDTH + 50, (row+1) * CELL_HEIGHT + 50, 2 * CELL_WIDTH - 2 * 50, CELL_HEIGHT - 2 * 50),
+                    (col * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, CELL_WIDTH - 2 * 50, 2 * CELL_HEIGHT - 2 * 50)
+                ]
+                self.layouts = [
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'M',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'W' if col == MAZE_SIZE-1 else 'T'
+                    },
+                    {
+                        'u': 'M',
+                        'd': 'W' if row+1 == MAZE_SIZE-1 else 'T',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'M'
+                    },
+                    {
+                        'u': 'W' if row+1 == 0 else 'T',
+                        'd': 'W' if row+1 == MAZE_SIZE-1 else 'T',
+                        'l': 'M',
+                        'r': 'W' if col+1 == MAZE_SIZE-1 else 'T'
+                    }
+                ]
+            case 'urL':
+                assert(htunnel.relations[1] is vtunnel.relations[0])
+                row = htunnel.relations[0].row
+                col = htunnel.relations[0].col
+                self.outerline = LCell.outerline_urL
+                self.innerline = LCell.innerline_urL
+                cells = [htunnel.relations[0], htunnel.relations[1], vtunnel.relations[1]]
+                self.areas = [
+                    (col * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, 2 * CELL_WIDTH - 2 * 50, CELL_HEIGHT - 2 * 50),
+                    ((col+1) * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, CELL_WIDTH - 2 * 50, 2 * CELL_HEIGHT - 2 * 50)
+                ]
+                self.layouts = [
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'W' if row == MAZE_SIZE-1 else 'T',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'M'
+                    },
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'M',
+                        'l': 'M',
+                        'r': 'W' if col+1 == MAZE_SIZE-1 else 'T'
+                    },
+                    {
+                        'u': 'M',
+                        'd': 'W' if row+1 == MAZE_SIZE-1 else 'T',
+                        'l': 'W' if col+1 == 0 else 'T',
+                        'r': 'W' if col+1 == MAZE_SIZE-1 else 'T'
+                    }
+                ]
+            case 'drL':
+                assert(htunnel.relations[1] is vtunnel.relations[1])
+                row = vtunnel.relations[0].row
+                col = htunnel.relations[0].col
+                self.outerline = LCell.outerline_drL
+                self.innerline = LCell.innerline_drL
+                cells = [vtunnel.relations[0], htunnel.relations[0], htunnel.relations[1]]
+                self.areas = [
+                    (col * CELL_WIDTH + 50, (row+1) * CELL_HEIGHT + 50, 2 * CELL_WIDTH - 2 * 50, CELL_HEIGHT - 2 * 50),
+                    ((col+1) * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, CELL_WIDTH - 2 * 50, 2 * CELL_HEIGHT - 2 * 50)
+                ]
+                self.layouts = [
+                    {
+                        'u': 'W' if row == 0 else 'T',
+                        'd': 'M',
+                        'l': 'W' if col+1 == 0 else 'T',
+                        'r': 'W' if col+1 == MAZE_SIZE-1 else 'T'
+                    },
+                    {
+                        'u': 'W' if row+1 == 0 else 'T',
+                        'd': 'W' if row+1 == MAZE_SIZE-1 else 'T',
+                        'l': 'W' if col == 0 else 'T',
+                        'r': 'M'
+                    },
+                    {
+                        'u': 'M',
+                        'd': 'W' if row+1 == MAZE_SIZE-1 else 'T',
+                        'l': 'M',
+                        'r': 'W' if col+1 == MAZE_SIZE-1 else 'T'
+                    }
+                ]
+            case _:
+                assert(0)
+        super().__init__(row, col, cells, tunnels, LCell.mini_bound, LCell.bound)
+    def is_inside(self, pos) -> bool:
+        inside_pos = (pos[0] - self.pos[0], pos[1] - self.pos[1])
+        match self.shape[0]:
+            case 'u':
+                if 0 <= inside_pos[0] <= 100 and 0 <= inside_pos[1] <= 50:
+                    return True
+            case 'd':
+                if 0 <= inside_pos[0] <= 100 and 50 <= inside_pos[1] <= 100:
+                    return True
+        match self.shape[1]:
+            case 'l':
+                if 0 <= inside_pos[0] <= 50 and 0 <= inside_pos[1] <= 100:
+                    return True
+            case 'r':
+                if 50 <= inside_pos[0] <= 100 and 0 <= inside_pos[1] <= 100:
+                    return True
+        return False
+
+class BlockFourCell(LargeCell):
+    outerline = [(0, 0), (100, 0), (100, 100), (0, 100)]
+    innerline = [(5, 5), (95, 5), (95, 95), (5, 95)]
+    mini_bound = [2 * TILE_WIDTH, 2 * TILE_HEIGHT]
+    bound = [2 * CELL_WIDTH, 2 * CELL_HEIGHT]
+    def __init__(self, utunnel, dtunnel, ltunnel, rtunnel):
+        assert(utunnel.relations[1] is rtunnel.relations[0])
+        assert(rtunnel.relations[1] is dtunnel.relations[1])
+        assert(dtunnel.relations[0] is ltunnel.relations[1])
+        assert(ltunnel.relations[0] is utunnel.relations[0])
+        row = utunnel.relations[0].row
+        col = utunnel.relations[0].col
+        cells = [utunnel.relations[0], utunnel.relations[1], dtunnel.relations[0], dtunnel.relations[1]]
+        tunnels = [utunnel, dtunnel, ltunnel, rtunnel]
+        self.shape = '4'
+        self.areas = [
+            (col * CELL_WIDTH + 50, row * CELL_HEIGHT + 50, 2 * CELL_WIDTH - 2 * 50, 2 * CELL_HEIGHT - 2 * 50)
+        ]
+        self.outerline = BlockFourCell.outerline
+        self.innerline = BlockFourCell.innerline
+        self.layouts = [
+            {
+                'u': 'W' if row == 0 else 'T',
+                'd': 'M',
+                'l': 'W' if col == 0 else 'T',
+                'r': 'M',
+            },
+            {
+                'u': 'W' if row == 0 else 'T',
+                'd': 'M',
+                'l': 'M',
+                'r': 'W' if col+1 == MAZE_SIZE - 1 else 'T',
+            },
+            {
+                'u': 'M',
+                'd': 'W' if row+1 == MAZE_SIZE - 1 else 'T',
+                'l': 'W' if col == 0 else 'T',
+                'r': 'M',
+            },
+            {
+                'u': 'M',
+                'd': 'W' if row+1 == MAZE_SIZE - 1 else 'T',
+                'l': 'M',
+                'r': 'W' if col+1 == MAZE_SIZE - 1 else 'T',
+            }
+        ]
+        super().__init__(row, col, cells, tunnels, BlockFourCell.mini_bound, BlockFourCell.bound)
+    def is_inside(self, pos) -> bool:
+        inside_pos = (pos[0] - self.pos[0], pos[1] - self.pos[1])
+        if 0 <= inside_pos[0] <= 100 and 0 <= inside_pos[1] <= 100:
+            return True
+        return False
+    
+def get_all_cells():
+    return [cell for cell in SmallCell.all_small_cells if not cell.merge] + list(LargeCell.all_large_cells)
